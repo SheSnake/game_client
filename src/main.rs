@@ -1,4 +1,5 @@
 extern crate tokio;
+use std::mem;
 use std::env;
 use std::net::{ TcpStream };
 use std::io::{ Write, Read };
@@ -60,25 +61,20 @@ fn read_msg(stream: &mut TcpStream) -> Vec<u8> {
         len_buf[i] = buf[i + 1];
     }
     let len = i32::from_le_bytes(len_buf) as usize;
-    while nread <= len {
+    while nread < len {
+        println!("has read {}", nread);
         nread += stream.read(&mut buf[nread..]).unwrap()
     }
     return buf.iter().cloned().collect();
-    //let msg_type = buf[0];
-    //match msg_type {
-    //    1 => {
-    //        let msg = bincode::deserialize::<RoomManageResult> (&buf).unwrap();
-    //        let room_id: Vec<u8> = msg.room_id.iter().cloned().collect();
-    //        let room_id = String::from_utf8(room_id).unwrap();
-    //        println!("{}", room_id);
-    //    },
-    //    _ => {
-    //    }
-    //};
 }
 
 fn parse_to_room_manage_result(data: Vec<u8>) -> RoomManageResult {
     let msg = bincode::deserialize::<RoomManageResult> (&data).unwrap();
+    return msg;
+}
+
+fn parse_to_room_update(data: Vec<u8>) -> RoomUpdate {
+    let msg = bincode::deserialize::<RoomUpdate> (&data).unwrap();
     return msg;
 }
 
@@ -96,13 +92,37 @@ fn main() {
         login(&mut stream, &user_id);
         if room_id != "" {
             join(&mut stream, &user_id, &room_id);
+            let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
+            room_id = String::from_utf8(msg.room_id.clone()).unwrap();
+            println!("join room: {}", room_id);
         } else {
             create_room(&mut stream, &user_id);
             let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
             room_id = String::from_utf8(msg.room_id.clone()).unwrap();
+            println!("create room: {}", room_id);
         }
-        println!("create room: {}", room_id);
         ready(&mut stream, &user_id, &room_id);
+        let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
+        let mut start = false;
+        while !start {
+            let mut update = parse_to_room_update(read_msg(&mut stream));
+            match unsafe { mem::transmute(update.op_type) } {
+                OpType::JoinRoom => {
+                    println!("user :{} join room", update.user_id);
+                },
+                OpType::ReadyRoom => {
+                    println!("user :{} ready room", update.user_id);
+                },
+                OpType::LeaveRoom => {
+                    println!("user :{} leave room", update.user_id);
+                },
+                OpType::StartRoom => {
+                    start = true;
+                },
+                _ => {}
+            }
+        }
+        println!("game start!");
         loop {}
     }
     loop {}
