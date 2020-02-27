@@ -54,7 +54,7 @@ fn join(stream: &mut TcpStream, user_id: &i64, room_id: &String) {
 fn read_msg(stream: &mut TcpStream) -> Vec<u8> {
     let mut buf = [0u8; 4096];
     let mut nread: usize = 0;
-    while nread < 5 {
+    while nread < HEADER_SIZE {
         nread += stream.read(&mut buf[nread..5]).unwrap()
     }
     let mut len_buf = [0u8; 4];
@@ -95,6 +95,9 @@ fn main() {
     let mut stream = TcpStream::connect("0.0.0.0:8890");
     if let Ok(mut stream) = stream {
         login(&mut stream, &user_id);
+        let mut msg = read_msg(&mut stream);
+        let msg = bincode::deserialize::<AuthenResult> (&msg).unwrap();
+        println!("auth result: {}", msg.code);
         if room_id != "" {
             join(&mut stream, &user_id, &room_id);
             let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
