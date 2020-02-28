@@ -16,9 +16,9 @@ fn login(stream: &mut TcpStream, user_id: &i64) {
 }
 
 fn create_room(stream: &mut TcpStream, user_id: &i64) {
-    let msg_type: u8 = 1;
+    let msg_type: i8 = unsafe{ mem::transmute(MsgType::RoomOp) };
     let length: i32 = 5 + 1 + 8 + 6;
-    let op_type: u8 = 1;
+    let op_type: i8 = unsafe{ mem::transmute(OpType::CreateRoom)};
     let room_id = [0u8; 6];
     stream.write(&msg_type.to_le_bytes()).unwrap();
     stream.write(&length.to_le_bytes()).unwrap();
@@ -28,9 +28,9 @@ fn create_room(stream: &mut TcpStream, user_id: &i64) {
 }
 
 fn ready(stream: &mut TcpStream, user_id: &i64, room_id: &String) {
-    let msg_type: u8 = 1;
+    let msg_type: i8 = unsafe{ mem::transmute(MsgType::RoomOp) };
     let length: i32 = 5 + 1 + 8 + 6;
-    let op_type: u8 = 4;
+    let op_type: u8 = unsafe{ mem::transmute(OpType::ReadyRoom)};
     let room_id = room_id.clone().into_bytes();
     stream.write(&msg_type.to_le_bytes()).unwrap();
     stream.write(&length.to_le_bytes()).unwrap();
@@ -40,9 +40,9 @@ fn ready(stream: &mut TcpStream, user_id: &i64, room_id: &String) {
 }
 
 fn join(stream: &mut TcpStream, user_id: &i64, room_id: &String) {
-    let msg_type: u8 = 1;
+    let msg_type: i8 = unsafe{ mem::transmute(MsgType::RoomOp) };
     let length: i32 = 5 + 1 + 8 + 6;
-    let op_type: u8 = 2;
+    let op_type: i8 = unsafe{ mem::transmute(OpType::JoinRoom)};
     let room_id = room_id.clone().into_bytes();
     stream.write(&msg_type.to_le_bytes()).unwrap();
     stream.write(&length.to_le_bytes()).unwrap();
@@ -55,7 +55,7 @@ fn read_msg(stream: &mut TcpStream) -> Vec<u8> {
     let mut buf = [0u8; 4096];
     let mut nread: usize = 0;
     while nread < HEADER_SIZE {
-        nread += stream.read(&mut buf[nread..5]).unwrap()
+        nread += stream.read(&mut buf[nread..HEADER_SIZE]).unwrap()
     }
     let mut len_buf = [0u8; 4];
     for i in 0..4 {
@@ -97,37 +97,52 @@ fn main() {
         login(&mut stream, &user_id);
         let mut msg = read_msg(&mut stream);
         let msg = bincode::deserialize::<AuthenResult> (&msg).unwrap();
-        println!("auth result: {}", msg.code);
+        match unsafe{ mem::transmute(msg.code) } {
+            Code::AuthenOk => {
+                println!("auth {} success", user_id);
+            },
+            _ => {
+                println!("auth {} fail", msg.code);
+                return;
+            }
+        };
         if room_id != "" {
             join(&mut stream, &user_id, &room_id);
-            let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
-            room_id = String::from_utf8(msg.room_id.clone()).unwrap();
-            println!("join room: {}", room_id);
+            ready(&mut stream, &user_id, &room_id);
         } else {
             create_room(&mut stream, &user_id);
-            let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
-            room_id = String::from_utf8(msg.room_id.clone()).unwrap();
-            println!("create room: {}", room_id);
         }
-        ready(&mut stream, &user_id, &room_id);
-        let mut msg = parse_to_room_manage_result(read_msg(&mut stream));
         let mut start = false;
         while !start {
-            let mut update = parse_to_room_update(read_msg(&mut stream));
-            match unsafe { mem::transmute(update.op_type) } {
-                OpType::JoinRoom => {
-                    println!("user :{} join room", update.user_id);
+            let msg = read_msg(&mut stream);
+            let header = parse_header(msg.clone());
+            match unsafe { mem::transmute(header.msg_type) } {
+                MsgType::RoomManageResult => {
+                    let result = bincode::deserialize::<RoomManageResult>(&msg).unwrap();
+                    let room_id = String::from_utf8(result.room_id.clone()).unwrap();
+                    println!("user_id:{}, in room_id:{}, op_type:{}", user_id, room_id, result.op_type);
+                    match unsafe{ mem::transmute(result.op_type) } {
+                        OpType::CreateRoom => {
+                            ready(&mut stream, &user_id, &room_id);
+                        },
+                        _ => {},
+                    }
                 },
-                OpType::ReadyRoom => {
-                    println!("user :{} ready room", update.user_id);
+                MsgType::RoomSnapshot => {
+                    let snapshot = bincode::deserialize::<RoomSnapshot>(&msg).unwrap();
+                    let room_id = String::from_utf8(snapshot.room_id.clone()).unwrap();
+                    println!("room_id:{} status: user_pos:{:?} user_ready_status:{:?}",
+                        room_id, snapshot.user_pos, snapshot.user_ready_status);
                 },
-                OpType::LeaveRoom => {
-                    println!("user :{} leave room", update.user_id);
-                },
-                OpType::StartRoom => {
+                MsgType::RoomUpdate => {
                     start = true;
                 },
-                _ => {}
+                MsgType::GameSnapshot => {
+                    start = true;
+                }
+                _ => {
+                    println!("read msg type:{}, len:{}", header.msg_type, header.len);
+                }
             }
         }
         println!("game start!");
@@ -151,13 +166,17 @@ fn main() {
                         Action::Pop => {
                             if update.game_info.user_id == user_id {
                                 let mut target: usize = 0;
+                                let mut found = false;
                                 for (ix, &card) in my_cards.iter().enumerate() {
                                     if card == update.target {
                                         target = ix;
+                                        found = true;
                                         break;
                                     }
                                 }
-                                my_cards.remove(target);
+                                if found: {
+                                    my_cards.remove(target);
+                                }
                             }
                             println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step, update.game_info.user_id, update.op_type, update.target);
                         },
@@ -186,7 +205,6 @@ fn main() {
                     println!("{} can choose to: {}", cur_info, choose);
                     let data: &[u8] = &bincode::serialize::<GameOperation>(&op_list.operations[0]).unwrap();
                     stream.write(data);
-
                 },
                 MsgType::GameRoundUpdate => {
                     let update = bincode::deserialize::<GameRoundUpdate> (&msg).unwrap();
