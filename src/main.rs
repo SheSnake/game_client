@@ -91,144 +91,172 @@ fn main() {
     if args.len() >= 3 {
         room_id = args[2].clone();
     }
+    let mut in_room = false;
+    let mut logined = false;
+    let mut is_ready = false;
 
     let mut stream = TcpStream::connect("0.0.0.0:8890");
     if let Ok(mut stream) = stream {
-        login(&mut stream, &user_id);
-        let mut msg = read_msg(&mut stream);
-        let msg = bincode::deserialize::<AuthenResult> (&msg).unwrap();
-        match unsafe{ mem::transmute(msg.code) } {
-            Code::AuthenOk => {
-                println!("auth {} success", user_id);
-            },
-            _ => {
-                println!("auth {} fail", msg.code);
-                return;
-            }
-        };
-        if room_id != "" {
-            join(&mut stream, &user_id, &room_id);
-            ready(&mut stream, &user_id, &room_id);
-        } else {
-            create_room(&mut stream, &user_id);
-        }
-        let mut start = false;
-        while !start {
-            let msg = read_msg(&mut stream);
-            let header = parse_header(msg.clone());
-            match unsafe { mem::transmute(header.msg_type) } {
-                MsgType::RoomManageResult => {
-                    let result = bincode::deserialize::<RoomManageResult>(&msg).unwrap();
-                    let room_id = String::from_utf8(result.room_id.clone()).unwrap();
-                    println!("user_id:{}, in room_id:{}, op_type:{}", user_id, room_id, result.op_type);
-                    match unsafe{ mem::transmute(result.op_type) } {
-                        OpType::CreateRoom => {
-                            ready(&mut stream, &user_id, &room_id);
-                        },
-                        _ => {},
-                    }
-                },
-                MsgType::RoomSnapshot => {
-                    let snapshot = bincode::deserialize::<RoomSnapshot>(&msg).unwrap();
-                    let room_id = String::from_utf8(snapshot.room_id.clone()).unwrap();
-                    println!("room_id:{} status: user_pos:{:?} user_ready_status:{:?}",
-                        room_id, snapshot.user_pos, snapshot.user_ready_status);
-                },
-                MsgType::RoomUpdate => {
-                    start = true;
-                },
-                MsgType::GameSnapshot => {
-                    start = true;
-                }
-                _ => {
-                    println!("read msg type:{}, len:{}", header.msg_type, header.len);
-                }
-            }
-        }
-        println!("game start!");
-        let mut my_cards: Vec<u8> = Vec::new();
         loop {
-            let mut msg = read_msg(&mut stream);
-            let header = parse_header(msg.clone());
-            match unsafe { mem::transmute(header.msg_type) } {
-                MsgType::GameUpdate => {
-                    let update = bincode::deserialize::<GameUpdate> (&msg).unwrap();
-                    match unsafe { mem::transmute(update.op_type) } {
-                        Action::DealBeginCard => {
-                            println!("recv begin card: {:?}", update.provide_cards);
-                            my_cards = update.provide_cards;
-                        },
-                        Action::DealNextCard => {
-                            println!("cur_round:{} cur_step:{} user: {} on_hand:{:?} recv new card: {:?}", update.game_info.cur_game_round, update.game_info.cur_game_step, update.game_info.user_id, update.provide_cards, update.target);
-                            my_cards.push(update.target);
-                            my_cards.sort();
-                        },
-                        Action::Pop => {
-                            if update.game_info.user_id == user_id {
-                                let mut target: usize = 0;
-                                let mut found = false;
-                                for (ix, &card) in my_cards.iter().enumerate() {
-                                    if card == update.target {
-                                        target = ix;
-                                        found = true;
-                                        break;
+            if !logined {
+                login(&mut stream, &user_id);
+                let mut msg = read_msg(&mut stream);
+                let msg = bincode::deserialize::<AuthenResult> (&msg).unwrap();
+                match unsafe{ mem::transmute(msg.code) } {
+                    Code::AuthenOk => {
+                        println!("auth {} success", user_id);
+                        logined = true;
+                    },
+                    _ => {
+                        println!("auth {} fail", msg.code);
+                        return;
+                    }
+                };
+            }
+
+            if !in_room {
+                if room_id != "" {
+                    join(&mut stream, &user_id, &room_id);
+                } else {
+                    create_room(&mut stream, &user_id);
+                }
+            }
+
+            let mut start = false;
+            while !start {
+                let msg = read_msg(&mut stream);
+                let header = parse_header(msg.clone());
+                match unsafe { mem::transmute(header.msg_type) } {
+                    MsgType::RoomManageResult => {
+                        let result = bincode::deserialize::<RoomManageResult>(&msg).unwrap();
+                        match unsafe{ mem::transmute(result.op_type) } {
+                            OpType::ReadyRoom => {
+                                is_ready = true;
+                            },
+                            OpType::CreateRoom => {
+                                if result.code == unsafe { mem::transmute(Code::CreateOk) } {
+                                    room_id = String::from_utf8(result.room_id.clone()).unwrap();
+                                    in_room = true;
+                                }
+                            }
+                            _ => {},
+                        }
+                        println!("user_id:{}, in room_id:{}, op_type:{} code:{}", user_id, room_id, result.op_type, result.code);
+
+                        if !is_ready {
+                            println!("try ready");
+                            ready(&mut stream, &user_id, &room_id);
+                        }
+
+                    },
+                    MsgType::RoomSnapshot => {
+                        let snapshot = bincode::deserialize::<RoomSnapshot>(&msg).unwrap();
+                        let room_id = String::from_utf8(snapshot.room_id.clone()).unwrap();
+                        println!("recv room snapshot, room_id:{} status: user_pos:{:?} user_ready_status:{:?}",
+                            room_id, snapshot.user_pos, snapshot.user_ready_status);
+                    },
+                    MsgType::RoomUpdate => {
+                        start = true;
+                    },
+                    MsgType::GameSnapshot => {
+                        start = true;
+                    }
+                    _ => {
+                        println!("read unknow msg type:{}, len:{}", header.msg_type, header.len);
+                    }
+                }
+            }
+            println!("game start!");
+            let mut my_cards: Vec<u8> = Vec::new();
+            loop {
+                let mut msg = read_msg(&mut stream);
+                let header = parse_header(msg.clone());
+                match unsafe { mem::transmute(header.msg_type) } {
+                    MsgType::GameUpdate => {
+                        let update = bincode::deserialize::<GameUpdate> (&msg).unwrap();
+                        match unsafe { mem::transmute(update.op_type) } {
+                            Action::DealBeginCard => {
+                                println!("recv begin card: {:?}", update.provide_cards);
+                                my_cards = update.provide_cards;
+                            },
+                            Action::DealNextCard => {
+                                println!("cur_round:{} cur_step:{} user: {} on_hand:{:?} recv new card: {:?}", update.game_info.cur_game_round, update.game_info.cur_game_step, update.game_info.user_id, update.provide_cards, update.target);
+                                my_cards.push(update.target);
+                                my_cards.sort();
+                            },
+                            Action::Pop => {
+                                if update.game_info.user_id == user_id {
+                                    let mut target: usize = 0;
+                                    let mut found = false;
+                                    for (ix, &card) in my_cards.iter().enumerate() {
+                                        if card == update.target {
+                                            target = ix;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if found {
+                                        my_cards.remove(target);
                                     }
                                 }
-                                if found: {
-                                    my_cards.remove(target);
-                                }
-                            }
-                            println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step, update.game_info.user_id, update.op_type, update.target);
-                        },
-                        Action::Peng => {
-                            println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
-                        },
-                        Action::Chi => {
-                            println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
-                        },
-                        Action::Gang => {
-                            println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
-                        },
-                        Action::Hu => {
-                            println!("cur_round:{} cur_step:{} user: {}, win by {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
-                        },
-                        _ => {}
-                    }
-                },
-                MsgType::GameOpPack => {
-                    let op_list = bincode::deserialize::<GameOperationPack> (&msg).unwrap();
-                    let mut cur_info = format!("cur_round:{} cur_step:{} ", op_list.operations[0].game_info.cur_game_round, op_list.operations[0].game_info.cur_game_step);
-                    let mut choose = "".to_string();
-                    for op in op_list.operations.iter() {
-                        choose += &format!("do {}, target {}, ", op.op_type, op.target);
-                    }
-                    println!("{} can choose to: {}", cur_info, choose);
-                    let data: &[u8] = &bincode::serialize::<GameOperation>(&op_list.operations[0]).unwrap();
-                    stream.write(data);
-                },
-                MsgType::GameRoundUpdate => {
-                    let update = bincode::deserialize::<GameRoundUpdate> (&msg).unwrap();
-                    match unsafe { mem::transmute(update.round_info_type) } {
-                        RoundInfoType::RoundStart => {
-                            let mut content = format!("round {} start:", update.cur_round).to_string();
-                            for i in 0..4 {
-                                content += &format!(" user:{} score:{}", i, update.user_cur_score[i]);
-                            }
-                            println!("{}", content);
-                        },
-                        RoundInfoType::RoundOver => {
-                            let mut content = format!("round {} over:", update.cur_round).to_string();
-                            for i in 0..4 {
-                                content += &format!(" user:{} score:{}", i, update.user_cur_score[i]);
-                            }
-                            println!("{}", content);
+                                println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step, update.game_info.user_id, update.op_type, update.target);
+                            },
+                            Action::Peng => {
+                                println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
+                            },
+                            Action::Chi => {
+                                println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
+                            },
+                            Action::Gang => {
+                                println!("cur_round:{} cur_step:{} user: {}, do {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
+                            },
+                            Action::Hu => {
+                                println!("cur_round:{} cur_step:{} user: {}, win by {}, target:{}", update.game_info.cur_game_round, update.game_info.cur_game_step,  update.game_info.user_id, update.op_type, update.target);
+                            },
+                            _ => {}
                         }
+                    },
+                    MsgType::GameOpPack => {
+                        let op_list = bincode::deserialize::<GameOperationPack> (&msg).unwrap();
+                        let mut cur_info = format!("cur_round:{} cur_step:{} ", op_list.operations[0].game_info.cur_game_round, op_list.operations[0].game_info.cur_game_step);
+                        let mut choose = "".to_string();
+                        for op in op_list.operations.iter() {
+                            choose += &format!("do {}, target {}, ", op.op_type, op.target);
+                        }
+                        println!("{} can choose to: {}", cur_info, choose);
+                        let data: &[u8] = &bincode::serialize::<GameOperation>(&op_list.operations[0]).unwrap();
+                        stream.write(data);
+                    },
+                    MsgType::GameRoundUpdate => {
+                        let update = bincode::deserialize::<GameRoundUpdate> (&msg).unwrap();
+                        match unsafe { mem::transmute(update.round_info_type) } {
+                            RoundInfoType::RoundStart => {
+                                let mut content = format!("round {} start:", update.cur_round).to_string();
+                                for i in 0..4 {
+                                    content += &format!(" user:{} score:{}", i, update.user_cur_score[i]);
+                                }
+                                println!("{}", content);
+                            },
+                            RoundInfoType::RoundOver => {
+                                let mut content = format!("round {} over:", update.cur_round).to_string();
+                                for i in 0..4 {
+                                    content += &format!(" user:{} score:{}", i, update.user_cur_score[i]);
+                                }
+                                println!("{}", content);
+                            }
+                        }
+                        my_cards.clear();
+                    },
+                    MsgType::GameOver => {
+                        let over = bincode::deserialize::<GameOver> (&msg).unwrap();
+                        println!("game over: {:?}", over.user_cur_score);
+                        is_ready = false;
+                        break;
+                    },
+                    _ => {
                     }
-                    my_cards.clear();
-                }
-                _ => {
-                }
-            };
+                };
+            }
         }
     }
     loop {}
