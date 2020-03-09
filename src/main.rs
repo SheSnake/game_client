@@ -11,6 +11,7 @@ use message::action::*;
 
 fn login(stream: &mut TcpStream, user_id: &i64) {
     let id = *user_id as u8;
+    let id: u8 = 48 + id;
     let session = [id; 128];
     stream.write(&session).unwrap();
 }
